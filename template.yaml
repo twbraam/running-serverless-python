@@ -1,0 +1,203 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Create thumbnails from files uploaded to S3 
+Parameters:
+  AppStage:
+    Type: String
+    Default: api
+    Description: API Gateway stage, used as a prefix for the endpoint URLs
+    AllowedPattern: ^[A-Za-z]+$
+    MaxLength: 10
+    MinLength: 1
+    ConstraintDescription: "1-10 Latin letters"
+  UploadLimitInMb:
+    Type: Number 
+    Default: 5
+    Description: Maximum upload size in megabytes
+    MinValue: 1
+    MaxValue: 100
+  ThumbnailWidth:
+    Type: Number 
+    Default: 300
+    Description: Thumbnail width in pixels 
+    MinValue: 10
+    MaxValue: 1000
+  AllowedImageExtensions:
+    Type: String
+    Default: jpg,jpeg,png,gif
+    Description: Comma-delimited list of allowed image file extensions (lowercase)
+Resources:
+  WebAssetsS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      WebsiteConfiguration:
+        ErrorDocument: 404.html
+        IndexDocument: index.html
+  UploadS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - POST
+            AllowedOrigins: 
+              - !GetAtt WebAssetsS3Bucket.WebsiteURL
+            MaxAge: 3600
+  ThumbnailsS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+            AllowedOrigins: 
+              - !GetAtt WebAssetsS3Bucket.WebsiteURL
+            MaxAge: 3600
+  WebApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref AppStage
+      Cors: !Sub "'${WebAssetsS3Bucket.WebsiteURL}'"
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          ThrottlingBurstLimit: 20
+          ThrottlingRateLimit: 10
+  ShowFormFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: user-form/
+      Handler: show_form.lambda_handler
+      Runtime: python3.8
+      Events:
+        ShowForm:
+          Type: Api
+          Properties:
+            Path: /sign/{extension}
+            Method: get
+            RestApiId: !Ref WebApi
+      Environment: 
+        Variables:
+          UPLOAD_S3_BUCKET: !Ref UploadS3Bucket
+          UPLOAD_LIMIT_IN_MB: !Ref UploadLimitInMb
+          CORS_ORIGIN: !GetAtt WebAssetsS3Bucket.WebsiteURL
+          THUMBNAILS_S3_BUCKET: !Ref ThumbnailsS3Bucket
+          ALLOWED_IMAGE_EXTENSIONS: !Ref AllowedImageExtensions
+      Policies:
+        - S3FullAccessPolicy:
+            BucketName: !Ref UploadS3Bucket
+        - S3ReadPolicy:
+            BucketName: !Ref ThumbnailsS3Bucket
+  ImageMagick:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location:
+        ApplicationId: arn:aws:serverlessrepo:us-east-1:145266761615:applications/image-magick-lambda-layer
+        SemanticVersion: 1.0.0
+  ConvertFileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: image-conversion/
+      Handler: index.lambda_handler
+      Runtime: python3.8
+      Events:
+        FileUploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref UploadS3Bucket
+            Events: s3:ObjectCreated:*
+      Timeout: 600
+      MemorySize: 1024
+      ReservedConcurrentExecutions: 10
+      Environment: 
+        Variables:
+          OUTPUT_BUCKET: !Ref ThumbnailsS3Bucket
+          THUMB_WIDTH: !Ref ThumbnailWidth
+      Policies:
+        - S3FullAccessPolicy:
+            BucketName: !Ref ThumbnailsS3Bucket
+      Layers:
+        - !GetAtt ImageMagick.Outputs.LayerVersion
+  ConvertFunctionCanReadUploads:
+    Type: AWS::IAM::Policy
+    Properties: 
+      PolicyName: ConvertFunctionCanReadUploads
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - "s3:GetObject"
+            Resource: 
+              - !Sub "${UploadS3Bucket.Arn}/*"
+      Roles:
+        - !Ref ConvertFileFunctionRole
+  DeployToS3:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location:
+        ApplicationId: arn:aws:serverlessrepo:us-east-1:375983427419:applications/deploy-to-s3
+        SemanticVersion: 1.0.0
+  SiteSource:
+    Type: AWS::Serverless::Function
+    Properties:
+      Layers: 
+        - !GetAtt DeployToS3.Outputs.Arn
+      CodeUri: web-site/
+      AutoPublishAlias: production
+      Runtime: python3.8
+      Handler: deployer.resource_handler
+      Timeout: 600
+      Policies:
+        - S3FullAccessPolicy:
+            BucketName: !Ref WebAssetsS3Bucket
+  DeploymentResource:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt SiteSource.Arn
+      Version: !Ref "SiteSource.Version"
+      TargetBucket: !Ref WebAssetsS3Bucket
+      Substitutions:
+        FilePattern: "*.html"
+        Values:
+          API_URL: !Sub "https://${WebApi}.execute-api.${AWS::Region}.amazonaws.com/${AppStage}/"
+      Acl: 'public-read'
+      CacheControlMaxAge: 600
+Outputs:
+  UserFormApi:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${WebApi}.execute-api.${AWS::Region}.amazonaws.com/${AppStage}/"
+  UploadBucket:
+    Description: "S3 Bucket for user information"
+    Value: !Ref UploadS3Bucket
+  ThumbnailsS3Bucket:
+    Description: "S3 Bucket for thumbnails"
+    Value: !Ref ThumbnailsS3Bucket
+  WebUrl:
+    Description: "Public web URL"
+    Value: !GetAtt WebAssetsS3Bucket.WebsiteURL
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: image-thumbnails
+    Description: >
+      A sample application for the Running Serverless book tutorial by Gojko Adzic rewritten in Python
+    Author: Thomas Braam
+    SemanticVersion: 1.0.0
+    SpdxLicenseId: MIT
+    LicenseUrl: LICENSE.md
+    ReadmeUrl: README.md 
+    Labels: ['layer', 'image', 'lambda', 'imagemagick', 'python']
+    HomePageUrl: https://runningserverless.com
+    SourceCodeUrl: https://runningserverless.com

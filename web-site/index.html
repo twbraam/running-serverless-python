@@ -1,0 +1,26 @@
+<html>
+  <body>
+    <div step="initial">
+      <h1>Select a file</h1>
+      <input type="hidden" id="apiurl" value="${API_URL}" />     
+      <input type="file" id="picker"/>
+    </div>
+    <div step="uploading" style="display: none">
+      Please wait, uploading...
+      <br/>
+      <progress id="progressbar" max="100" value="0" /> 
+    </div>
+    <div step="converting" style="display: none">
+      Please wait, converting your file...
+    </div>
+    <div step="result" style="display: none">
+      <h1>Your thumbnail is ready</h1>
+      <a id="resultlink">download it</a>
+    </div>
+    <div step="error" style="display: none">
+      <h1>There was an error creating the thumbnail</h1>
+      <p id="errortext"></p>
+    </div>
+    <script src="user-workflow.js"></script>
+  </body>
+</html>
